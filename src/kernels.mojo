@@ -1,13 +1,10 @@
 """Numeric kernels for bulk unit conversion and dimensional-vector algebra."""
 
-from std.algorithm import parallelize
 from std.sys import simd_width_of
 
-comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
+comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime BPtr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime NDIM = 7
-comptime PARALLEL_THRESHOLD = 1_000_000
-comptime PARALLEL_TASKS = 32
 
 
 def convert_f64_range(
@@ -23,33 +20,23 @@ def convert_f64_range(
     var vs = SIMD[DType.float64, W](scale)
     if shift == 0.0:
         while i + W <= end:
-            dst.store(i, src.load[width=W](i) * vs)
+            dst.unsafe_store(i, src.unsafe_load[width=W](i) * vs)
             i += W
         while i < end:
-            dst[i] = src[i] * scale
+            dst.unsafe_store(i, src.unsafe_load(i) * scale)
             i += 1
     else:
         var vb = SIMD[DType.float64, W](shift)
         while i + W <= end:
-            dst.store(i, src.load[width=W](i) * vs + vb)
+            dst.unsafe_store(i, src.unsafe_load[width=W](i) * vs + vb)
             i += W
         while i < end:
-            dst[i] = src[i] * scale + shift
+            dst.unsafe_store(i, src.unsafe_load(i) * scale + shift)
             i += 1
 
 
 def convert_f64(src: FPtr, dst: FPtr, n: Int, scale: Float64, shift: Float64):
-    if n < PARALLEL_THRESHOLD:
-        convert_f64_range(src, dst, 0, n, scale, shift)
-        return
-
-    @parameter
-    def convert_task(task: Int):
-        var start = n * task // PARALLEL_TASKS
-        var end = n * (task + 1) // PARALLEL_TASKS
-        convert_f64_range(src, dst, start, end, scale, shift)
-
-    parallelize[convert_task](PARALLEL_TASKS)
+    convert_f64_range(src, dst, 0, n, scale, shift)
 
 
 def add_converted_f64(
@@ -67,13 +54,17 @@ def add_converted_f64(
     var vb = SIMD[DType.float64, W](shift)
     var vo = SIMD[DType.float64, W](sign)
     while i + W <= n:
-        dst.store(
+        dst.unsafe_store(
             i,
-            lhs.load[width=W](i) + vo * (rhs.load[width=W](i) * vs + vb),
+            lhs.unsafe_load[width=W](i)
+            + vo * (rhs.unsafe_load[width=W](i) * vs + vb),
         )
         i += W
     while i < n:
-        dst[i] = lhs[i] + sign * (rhs[i] * scale + shift)
+        dst.unsafe_store(
+            i,
+            lhs.unsafe_load(i) + sign * (rhs.unsafe_load(i) * scale + shift),
+        )
         i += 1
 
 
@@ -83,7 +74,11 @@ def combine_dimensions(
     for row in range(rows):
         var base = row * NDIM
         for dim in range(NDIM):
-            dst[base + dim] = lhs[base + dim] + rhs_sign * rhs[base + dim]
+            dst.unsafe_store(
+                base + dim,
+                lhs.unsafe_load(base + dim)
+                + rhs_sign * rhs.unsafe_load(base + dim),
+            )
 
 
 def dimensions_equal_many(
@@ -93,9 +88,15 @@ def dimensions_equal_many(
         var same = True
         var base = row * NDIM
         for dim in range(NDIM):
-            if abs(lhs[base + dim] - rhs[base + dim]) > tolerance:
+            if (
+                abs(
+                    lhs.unsafe_load(base + dim)
+                    - rhs.unsafe_load(base + dim)
+                )
+                > tolerance
+            ):
                 same = False
-        dst[row] = UInt8(1 if same else 0)
+        dst.unsafe_store(row, UInt8(1 if same else 0))
 
 
 @export("mp_convert_f64")
