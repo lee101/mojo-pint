@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import atexit
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import os
 import shutil
 import subprocess
 import sys
-import threading
 
 import numpy as np
 
@@ -25,10 +24,13 @@ _SIGNATURES = {
     "mp_convert_f64": ([I, I, I, F, F], None),
     "mp_convert_f64_serial": ([I, I, I, F, F], None),
     "mp_add_converted_f64": ([I, I, I, I, F, F, F], None),
+    "mp_add_converted_f64_serial": ([I, I, I, I, F, F, F], None),
     "mp_combine_dimensions": ([I, I, I, I, F], None),
     "mp_dimensions_equal_many": ([I, I, I, I, F], None),
 }
 _PARALLEL_THRESHOLD = 1_000_000
+_PARALLEL_WORKERS = min(16, os.cpu_count() or 1)
+_executor = ThreadPoolExecutor(max_workers=_PARALLEL_WORKERS)
 
 
 class BuildError(RuntimeError):
@@ -72,9 +74,6 @@ def build(force: bool = False) -> str:
 
 
 _lib = None
-_cpu_device = None
-_cpu_device_release = None
-_runtime_lock = threading.Lock()
 
 
 def lib() -> ctypes.CDLL:
@@ -86,41 +85,6 @@ def lib() -> ctypes.CDLL:
             fn.argtypes = argtypes
             fn.restype = restype
     return _lib
-
-
-def _ensure_cpu_device() -> bool:
-    global _cpu_device, _cpu_device_release
-    if _cpu_device is not None:
-        return True
-    with _runtime_lock:
-        if _cpu_device is not None:
-            return True
-        try:
-            runtime = lib()
-            create = runtime.KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice
-            create.argtypes = []
-            create.restype = ctypes.c_void_p
-            release = runtime.KGEN_CompilerRT_AsyncRT_ReleaseCPUDevice
-            release.argtypes = [ctypes.c_void_p]
-            release.restype = None
-            device = create()
-        except (AttributeError, OSError):
-            return False
-        if not device:
-            return False
-        _cpu_device = device
-        _cpu_device_release = release
-        return True
-
-
-def _release_cpu_device() -> None:
-    global _cpu_device
-    if _cpu_device is not None and _cpu_device_release is not None:
-        _cpu_device_release(_cpu_device)
-        _cpu_device = None
-
-
-atexit.register(_release_cpu_device)
 
 
 def addr(array: np.ndarray) -> int:
@@ -155,11 +119,28 @@ def _convert_f64(
         raise ValueError("conversion output must be writable")
     if source.size == 0:
         return
-    runtime = lib()
-    convert = runtime.mp_convert_f64
-    if source.size >= _PARALLEL_THRESHOLD and not _ensure_cpu_device():
-        convert = runtime.mp_convert_f64_serial
-    convert(addr(source), addr(result), source.size, scale, shift)
+    convert = lib().mp_convert_f64_serial
+    source_addr = addr(source)
+    result_addr = addr(result)
+    if source.size < _PARALLEL_THRESHOLD:
+        convert(source_addr, result_addr, source.size, scale, shift)
+        return
+    futures = []
+    for worker in range(_PARALLEL_WORKERS):
+        start = worker * source.size // _PARALLEL_WORKERS
+        end = (worker + 1) * source.size // _PARALLEL_WORKERS
+        futures.append(
+            _executor.submit(
+                convert,
+                source_addr + start * 8,
+                result_addr + start * 8,
+                end - start,
+                scale,
+                shift,
+            )
+        )
+    for future in futures:
+        future.result()
 
 
 def convert_array_inplace(value, scale: float, shift: float) -> np.ndarray:
@@ -191,9 +172,39 @@ def add_converted_arrays(lhs, rhs, scale: float, shift: float, sign=1.0):
     result = np.empty_like(left)
     if left.size == 0:
         return result
-    lib().mp_add_converted_f64(
-        addr(left), addr(right), addr(result), left.size, scale, shift, sign
-    )
+    add = lib().mp_add_converted_f64_serial
+    left_addr = addr(left)
+    right_addr = addr(right)
+    result_addr = addr(result)
+    if left.size < _PARALLEL_THRESHOLD:
+        add(
+            left_addr,
+            right_addr,
+            result_addr,
+            left.size,
+            scale,
+            shift,
+            sign,
+        )
+        return result
+    futures = []
+    for worker in range(_PARALLEL_WORKERS):
+        start = worker * left.size // _PARALLEL_WORKERS
+        end = (worker + 1) * left.size // _PARALLEL_WORKERS
+        futures.append(
+            _executor.submit(
+                add,
+                left_addr + start * 8,
+                right_addr + start * 8,
+                result_addr + start * 8,
+                end - start,
+                scale,
+                shift,
+                sign,
+            )
+        )
+    for future in futures:
+        future.result()
     return result
 
 

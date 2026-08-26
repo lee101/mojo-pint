@@ -63,6 +63,21 @@ def test_array_addition_empty_and_complex_paths():
     )
 
 
+def test_array_addition_parallel_threshold_and_worker_tails_match_numpy():
+    for size in (
+        _PARALLEL_THRESHOLD - 1,
+        _PARALLEL_THRESHOLD,
+        _PARALLEL_THRESHOLD + 3,
+    ):
+        left = np.arange(size, dtype=np.float64)
+        right = left[::-1].copy()
+        expected = left - (right * 0.25 - 2.0)
+        assert np.array_equal(
+            add_converted_arrays(left, right, 0.25, -2.0, -1.0),
+            expected,
+        )
+
+
 def test_conversion_parallel_threshold_and_worker_tails_match_numpy():
     for size in (
         _PARALLEL_THRESHOLD - 1,

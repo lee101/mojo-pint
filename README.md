@@ -80,11 +80,11 @@ Measured by the command above on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux
 
 | Benchmark | Mojo-Pint | Pint | Pint / Mojo-Pint | Result |
 |---|---:|---:|---:|:---|
-| meter to inch, float64 array (5M) | 10.56 ms | 39.07 ms | 3.70x | faster |
-| degC to degF, float64 array (5M) | 11.83 ms | 178.77 ms | 15.11x | faster |
-| add meter + centimeter arrays (3M) | 10.21 ms | 15.96 ms | 1.56x | faster |
-| parse cached compound expression (50k) | 190.35 ms | 11482.14 ms | 60.32x | faster |
-| unit compatibility checks (50k) | 117.10 ms | 3625.00 ms | 30.96x | faster |
+| meter to inch, float64 array (5M) | 4.84 ms | 19.11 ms | 3.95x | faster |
+| degC to degF, float64 array (5M) | 5.45 ms | 69.49 ms | 12.75x | faster |
+| add meter + centimeter arrays (3M) | 2.31 ms | 11.28 ms | 4.89x | faster |
+| parse cached compound expression (50k) | 176.03 ms | 10130.55 ms | 57.55x | faster |
+| unit compatibility checks (50k) | 107.51 ms | 3364.66 ms | 31.30x | faster |
 
 The parsing and compatibility cases use the best of three runs because each
 Pint sample takes several seconds. These are end-to-end Python API timings,
@@ -99,14 +99,19 @@ fixed-width seven-element dimensional vector ordered as length, mass, time,
 current, temperature, substance, and luminosity.
 
 Large conversions use the affine operation `destination = source * scale +
-shift` in a SIMD Mojo kernel with a scalar remainder loop. Small arrays stay
-serial; large conversions are split into independent CPU tasks. NumPy provides
-contiguous `float64` input and output arrays; ctypes passes their addresses
-across the C ABI, and Mojo reconstructs mutable `UnsafePointer` values
-internally. Python retains ownership of every buffer for the full call,
-contiguous `float64` inputs cross the boundary without a copy, and in-place
-conversion reuses writable storage. Empty arrays are handled before pointer
-construction. Complex and extended-precision arrays stay in NumPy so the FFI
-cannot silently narrow them.
+shift` in a SIMD Mojo kernel with an unaligned-safe vector loop and a scalar
+remainder loop. Small arrays stay serial; arrays of at least one million
+elements are divided among up to 16 persistent CPU workers. Each worker passes
+an address and range directly into the Mojo kernel, without creating NumPy
+slices. NumPy provides contiguous `float64` input and output arrays; ctypes
+passes their addresses across the C ABI, and Mojo reconstructs mutable
+`UnsafePointer` values internally. Python retains ownership of every buffer for
+the full call, contiguous `float64` inputs cross the boundary without a copy,
+and in-place conversion reuses writable storage. Empty arrays are handled
+before pointer construction. Complex and extended-precision arrays stay in
+NumPy so the FFI cannot silently narrow them.
 
-There is no GPU path.
+There is no GPU path. Conversion performs at most two floating-point operations
+per 16 bytes moved, while fused converted addition performs at most four per 24
+bytes moved. Both are far below the roughly two-flops-per-byte threshold where
+device transfer and launch overhead can be justified, so a GPU path would lose.

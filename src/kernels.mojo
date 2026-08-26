@@ -20,23 +20,83 @@ def convert_f64_range(
     var vs = SIMD[DType.float64, W](scale)
     if shift == 0.0:
         while i + W <= end:
-            dst.unsafe_store(i, src.unsafe_load[width=W](i) * vs)
+            dst.unsafe_store[alignment=1](
+                i, src.unsafe_load[width=W, alignment=1](i) * vs
+            )
             i += W
         while i < end:
-            dst.unsafe_store(i, src.unsafe_load(i) * scale)
+            dst.unsafe_store[alignment=1](
+                i, src.unsafe_load[alignment=1](i) * scale
+            )
             i += 1
     else:
         var vb = SIMD[DType.float64, W](shift)
         while i + W <= end:
-            dst.unsafe_store(i, src.unsafe_load[width=W](i) * vs + vb)
+            dst.unsafe_store[alignment=1](
+                i, src.unsafe_load[width=W, alignment=1](i) * vs + vb
+            )
             i += W
         while i < end:
-            dst.unsafe_store(i, src.unsafe_load(i) * scale + shift)
+            dst.unsafe_store[alignment=1](
+                i, src.unsafe_load[alignment=1](i) * scale + shift
+            )
             i += 1
 
 
 def convert_f64(src: FPtr, dst: FPtr, n: Int, scale: Float64, shift: Float64):
     convert_f64_range(src, dst, 0, n, scale, shift)
+
+
+def add_converted_f64_range(
+    lhs: FPtr,
+    rhs: FPtr,
+    dst: FPtr,
+    start: Int,
+    end: Int,
+    scale: Float64,
+    shift: Float64,
+    sign: Float64,
+):
+    comptime W = simd_width_of[DType.float64]()
+    var i = start
+    var vs = SIMD[DType.float64, W](scale)
+    if shift == 0.0 and sign == 1.0:
+        while i + W <= end:
+            dst.unsafe_store[alignment=1](
+                i,
+                lhs.unsafe_load[width=W, alignment=1](i)
+                + rhs.unsafe_load[width=W, alignment=1](i) * vs,
+            )
+            i += W
+        while i < end:
+            dst.unsafe_store[alignment=1](
+                i,
+                lhs.unsafe_load[alignment=1](i)
+                + rhs.unsafe_load[alignment=1](i) * scale,
+            )
+            i += 1
+    else:
+        var vb = SIMD[DType.float64, W](shift)
+        var vo = SIMD[DType.float64, W](sign)
+        while i + W <= end:
+            dst.unsafe_store[alignment=1](
+                i,
+                lhs.unsafe_load[width=W, alignment=1](i)
+                + vo
+                    * (
+                        rhs.unsafe_load[width=W, alignment=1](i) * vs
+                        + vb
+                    ),
+            )
+            i += W
+        while i < end:
+            dst.unsafe_store[alignment=1](
+                i,
+                lhs.unsafe_load[alignment=1](i)
+                + sign
+                    * (rhs.unsafe_load[alignment=1](i) * scale + shift),
+            )
+            i += 1
 
 
 def add_converted_f64(
@@ -48,24 +108,7 @@ def add_converted_f64(
     shift: Float64,
     sign: Float64,
 ):
-    comptime W = simd_width_of[DType.float64]()
-    var i = 0
-    var vs = SIMD[DType.float64, W](scale)
-    var vb = SIMD[DType.float64, W](shift)
-    var vo = SIMD[DType.float64, W](sign)
-    while i + W <= n:
-        dst.unsafe_store(
-            i,
-            lhs.unsafe_load[width=W](i)
-            + vo * (rhs.unsafe_load[width=W](i) * vs + vb),
-        )
-        i += W
-    while i < n:
-        dst.unsafe_store(
-            i,
-            lhs.unsafe_load(i) + sign * (rhs.unsafe_load(i) * scale + shift),
-        )
-        i += 1
+    add_converted_f64_range(lhs, rhs, dst, 0, n, scale, shift, sign)
 
 
 def combine_dimensions(
@@ -154,6 +197,30 @@ def mp_add_converted_f64(
         FPtr(unsafe_from_address=lhs_addr),
         FPtr(unsafe_from_address=rhs_addr),
         FPtr(unsafe_from_address=dst_addr),
+        n,
+        scale,
+        shift,
+        sign,
+    )
+
+
+@export("mp_add_converted_f64_serial")
+def mp_add_converted_f64_serial(
+    lhs_addr: Int,
+    rhs_addr: Int,
+    dst_addr: Int,
+    n: Int,
+    scale: Float64,
+    shift: Float64,
+    sign: Float64,
+) abi("C"):
+    if n <= 0 or lhs_addr == 0 or rhs_addr == 0 or dst_addr == 0:
+        return
+    add_converted_f64_range(
+        FPtr(unsafe_from_address=lhs_addr),
+        FPtr(unsafe_from_address=rhs_addr),
+        FPtr(unsafe_from_address=dst_addr),
+        0,
         n,
         scale,
         shift,
